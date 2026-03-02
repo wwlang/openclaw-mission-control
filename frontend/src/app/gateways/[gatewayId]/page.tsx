@@ -116,6 +116,7 @@ export default function GatewayDetailPage() {
         gateway_url: gateway.url,
         gateway_token: gateway.token ?? undefined,
         gateway_disable_device_pairing: gateway.disable_device_pairing,
+        gateway_allow_insecure_tls: gateway.allow_insecure_tls,
       }
     : {};
 

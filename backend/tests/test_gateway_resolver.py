@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+import app.services.openclaw.session_service as session_service
 from app.models.gateways import Gateway
 from app.schemas.gateway_api import GatewayResolveQuery
 from app.services.openclaw.gateway_resolver import (
@@ -100,3 +101,82 @@ async def test_resolve_gateway_keeps_gateway_allow_insecure_tls_for_direct_url()
     )
 
     assert config.allow_insecure_tls is True
+
+
+class _FakeGatewayQuery:
+    def __init__(self, gateway: Gateway | None) -> None:
+        self._gateway = gateway
+        self.filters: list[dict[str, object]] = []
+
+    def filter_by(self, **kwargs: object) -> _FakeGatewayQuery:
+        self.filters.append(kwargs)
+        return self
+
+    async def first(self, _session: object) -> Gateway | None:
+        return self._gateway
+
+
+class _FakeAsyncSession:
+    async def exec(
+        self, *_args: object, **_kwargs: object
+    ) -> None:  # pragma: no cover - guard only
+        return None
+
+
+@pytest.mark.asyncio
+async def test_resolve_gateway_uses_saved_gateway_settings_when_direct_flags_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _gateway(
+        disable_device_pairing=True,
+        allow_insecure_tls=True,
+        url="wss://gateway.example:18789/ws",
+        token=" db-token ",
+    )
+    fake_query = _FakeGatewayQuery(gateway)
+    monkeypatch.setattr(session_service.Gateway, "objects", fake_query)
+
+    service = GatewaySessionService(session=_FakeAsyncSession())  # type: ignore[arg-type]
+    _, config, _ = await service.resolve_gateway(
+        GatewayResolveQuery(gateway_url=gateway.url),
+        user=None,
+        organization_id=gateway.organization_id,
+    )
+
+    assert config.token is None
+    assert config.allow_insecure_tls is True
+    assert config.disable_device_pairing is True
+    assert fake_query.filters == [
+        {"url": gateway.url},
+        {"organization_id": gateway.organization_id},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_gateway_prefers_explicit_direct_flags_over_saved_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _gateway(
+        disable_device_pairing=True,
+        allow_insecure_tls=True,
+        url="wss://gateway.example:18789/ws",
+        token="db-token",
+    )
+    fake_query = _FakeGatewayQuery(gateway)
+    monkeypatch.setattr(session_service.Gateway, "objects", fake_query)
+
+    service = GatewaySessionService(session=object())  # type: ignore[arg-type]
+    _, config, _ = await service.resolve_gateway(
+        GatewayResolveQuery(
+            gateway_url=gateway.url,
+            gateway_token="explicit-token",
+            gateway_allow_insecure_tls=False,
+            gateway_disable_device_pairing=False,
+        ),
+        user=None,
+        organization_id=gateway.organization_id,
+    )
+
+    assert config.token == "explicit-token"
+    assert config.allow_insecure_tls is False
+    assert config.disable_device_pairing is False

@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 
 from app.core.logging import TRACE_LEVEL
 from app.models.boards import Board
+from app.models.gateways import Gateway
 from app.schemas.gateway_api import (
     GatewayResolveQuery,
     GatewaySessionHistoryResponse,
@@ -65,8 +66,8 @@ class GatewaySessionService(OpenClawDBService):
         board_id: str | None,
         gateway_url: str | None,
         gateway_token: str | None,
-        gateway_disable_device_pairing: bool = False,
-        gateway_allow_insecure_tls: bool = False,
+        gateway_disable_device_pairing: bool | None = None,
+        gateway_allow_insecure_tls: bool | None = None,
     ) -> GatewayResolveQuery:
         return GatewayResolveQuery(
             board_id=board_id,
@@ -95,6 +96,7 @@ class GatewaySessionService(OpenClawDBService):
         params: GatewayResolveQuery,
         *,
         user: User | None = None,
+        organization_id: UUID | None = None,
     ) -> tuple[Board | None, GatewayClientConfig, str | None]:
         self.logger.log(
             TRACE_LEVEL,
@@ -109,13 +111,34 @@ class GatewaySessionService(OpenClawDBService):
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="board_id or gateway_url is required",
                 )
+            token = (params.gateway_token or "").strip() or None
+            gateway: Gateway | None = None
+            can_query_saved_gateway = organization_id is not None and hasattr(self.session, "exec")
+            if can_query_saved_gateway and (
+                params.gateway_allow_insecure_tls is None
+                or params.gateway_disable_device_pairing is None
+            ):
+                gateway_query = Gateway.objects.filter_by(url=raw_url)
+                if organization_id is not None:
+                    gateway_query = gateway_query.filter_by(organization_id=organization_id)
+                gateway = await gateway_query.first(self.session)
+            allow_insecure_tls = (
+                params.gateway_allow_insecure_tls
+                if params.gateway_allow_insecure_tls is not None
+                else (gateway.allow_insecure_tls if gateway is not None else False)
+            )
+            disable_device_pairing = (
+                params.gateway_disable_device_pairing
+                if params.gateway_disable_device_pairing is not None
+                else (gateway.disable_device_pairing if gateway is not None else False)
+            )
             return (
                 None,
                 GatewayClientConfig(
                     url=raw_url,
-                    token=(params.gateway_token or "").strip() or None,
-                    allow_insecure_tls=params.gateway_allow_insecure_tls,
-                    disable_device_pairing=params.gateway_disable_device_pairing,
+                    token=token,
+                    allow_insecure_tls=allow_insecure_tls,
+                    disable_device_pairing=disable_device_pairing,
                 ),
                 None,
             )
@@ -194,7 +217,11 @@ class GatewaySessionService(OpenClawDBService):
         organization_id: UUID,
         user: User | None,
     ) -> GatewaysStatusResponse:
-        board, config, main_session = await self.resolve_gateway(params, user=user)
+        board, config, main_session = await self.resolve_gateway(
+            params,
+            user=user,
+            organization_id=organization_id,
+        )
         self._require_same_org(board, organization_id)
         try:
             compatibility = await check_gateway_version_compatibility(config)
