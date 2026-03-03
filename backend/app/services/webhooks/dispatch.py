@@ -62,6 +62,15 @@ def _webhook_message(
     )
 
 
+def _build_idempotency_key(payload_id: UUID) -> str:
+    """Build a deterministic idempotency key from the payload ID.
+
+    This ensures that retries for the same webhook payload use the same
+    idempotency key, enabling server-side deduplication in the gateway.
+    """
+    return f"webhook:{payload_id}"
+
+
 async def _notify_target_agent(
     *,
     session: AsyncSession,
@@ -87,12 +96,15 @@ async def _notify_target_agent(
         return
 
     message = _webhook_message(board=board, webhook=webhook, payload=payload)
+    # Use payload_id-based idempotency key to ensure retries don't create duplicate messages
+    idempotency_key = _build_idempotency_key(payload.id)
     await dispatch.try_send_agent_message(
         session_key=target_agent.openclaw_session_id,
         config=config,
         agent_name=target_agent.name,
         message=message,
         deliver=False,
+        idempotency_key=idempotency_key,
     )
 
 

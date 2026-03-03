@@ -46,9 +46,28 @@ class GatewayDispatchService(OpenClawDBService):
         agent_name: str,
         message: str,
         deliver: bool = False,
+        idempotency_key: str | None = None,
     ) -> None:
+        """Send a message to an agent session.
+
+        Args:
+            session_key: The agent's session identifier.
+            config: Gateway connection configuration.
+            agent_name: Name of the agent (used as session label).
+            message: The message content to send.
+            deliver: Whether to deliver the message immediately.
+            idempotency_key: Optional idempotency key for deduplication. Callers
+                should pass a persistent key when retrying to enable server-side
+                deduplication. If not provided, a new UUID will be generated.
+        """
         await ensure_session(session_key, config=config, label=agent_name)
-        await send_message(message, session_key=session_key, config=config, deliver=deliver)
+        await send_message(
+            message,
+            session_key=session_key,
+            config=config,
+            deliver=deliver,
+            idempotency_key=idempotency_key,
+        )
 
     async def try_send_agent_message(
         self,
@@ -58,7 +77,21 @@ class GatewayDispatchService(OpenClawDBService):
         agent_name: str,
         message: str,
         deliver: bool = False,
+        idempotency_key: str | None = None,
     ) -> OpenClawGatewayError | None:
+        """Try to send a message to an agent session, returning any error.
+
+        Args:
+            session_key: The agent's session identifier.
+            config: Gateway connection configuration.
+            agent_name: Name of the agent (used as session label).
+            message: The message content to send.
+            deliver: Whether to deliver the message immediately.
+            idempotency_key: Optional idempotency key for deduplication.
+
+        Returns:
+            None if successful, or the OpenClawGatewayError if the call failed.
+        """
         try:
             await self.send_agent_message(
                 session_key=session_key,
@@ -66,6 +99,7 @@ class GatewayDispatchService(OpenClawDBService):
                 agent_name=agent_name,
                 message=message,
                 deliver=deliver,
+                idempotency_key=idempotency_key,
             )
         except OpenClawGatewayError as exc:
             return exc

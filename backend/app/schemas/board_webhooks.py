@@ -62,3 +62,4 @@ class BoardWebhookIngestResponse(SQLModel):
     board_id: UUID
     webhook_id: UUID
     payload_id: UUID
+    duplicate: bool = False

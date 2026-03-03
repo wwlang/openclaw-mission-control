@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -46,6 +48,9 @@ BOARD_USER_READ_DEP = Depends(get_board_for_user_read)
 BOARD_USER_WRITE_DEP = Depends(get_board_for_user_write)
 BOARD_OR_404_DEP = Depends(get_board_or_404)
 logger = get_logger(__name__)
+
+# Deduplication window in minutes. Duplicate payloads within this window are skipped.
+WEBHOOK_DEDUP_WINDOW_MINUTES = 5
 
 
 def _webhook_endpoint_path(board_id: UUID, webhook_id: UUID) -> str:
@@ -200,6 +205,48 @@ def _webhook_memory_content(
     )
 
 
+def compute_payload_fingerprint(
+    payload: dict[str, object] | list[object] | str | int | float | bool | None,
+) -> str:
+    """Compute a deterministic fingerprint hash for a webhook payload.
+
+    This is used for deduplication - identical payloads produce identical hashes.
+    The hash is order-independent for dictionaries.
+    """
+    if isinstance(payload, dict):
+        # Sort keys for deterministic ordering
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    elif isinstance(payload, (list, str, int, float, bool)) or payload is None:
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    else:
+        serialized = str(payload)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+async def _find_duplicate_payload(
+    session: AsyncSession,
+    *,
+    board_id: UUID,
+    webhook_id: UUID,
+    fingerprint_hash: str,
+    window_minutes: int = WEBHOOK_DEDUP_WINDOW_MINUTES,
+) -> BoardWebhookPayload | None:
+    """Find an existing payload with the same fingerprint within the dedup window."""
+    cutoff = utcnow() - timedelta(minutes=window_minutes)
+    existing = (
+        await session.exec(
+            select(BoardWebhookPayload)
+            .where(col(BoardWebhookPayload.board_id) == board_id)
+            .where(col(BoardWebhookPayload.webhook_id) == webhook_id)
+            .where(col(BoardWebhookPayload.fingerprint_hash) == fingerprint_hash)
+            .where(col(BoardWebhookPayload.received_at) >= cutoff)
+            .order_by(col(BoardWebhookPayload.received_at).desc())
+            .limit(1)
+        )
+    ).first()
+    return existing
+
+
 async def _notify_lead_on_webhook_payload(
     *,
     session: AsyncSession,
@@ -242,12 +289,15 @@ async def _notify_lead_on_webhook_payload(
         "To inspect board memory entries:\n"
         f"GET /api/v1/agent/boards/{board.id}/memory?is_chat=false"
     )
+    # Use payload_id-based idempotency key to ensure retries don't create duplicate messages
+    idempotency_key = f"webhook:{payload.id}"
     await dispatch.try_send_agent_message(
         session_key=target_agent.openclaw_session_id,
         config=config,
         agent_name=target_agent.name,
         message=message,
         deliver=False,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -425,7 +475,10 @@ async def get_board_webhook_payload(
 @router.post(
     "/{webhook_id}",
     response_model=BoardWebhookIngestResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        200: {"description": "Duplicate payload detected, returning existing payload ID"},
+        202: {"description": "New payload accepted and queued for processing"},
+    },
 )
 async def ingest_board_webhook(
     request: Request,
@@ -433,7 +486,12 @@ async def ingest_board_webhook(
     board: Board = BOARD_OR_404_DEP,
     session: AsyncSession = SESSION_DEP,
 ) -> BoardWebhookIngestResponse:
-    """Open inbound webhook endpoint that stores payloads and nudges the board lead."""
+    """Open inbound webhook endpoint that stores payloads and nudges the board lead.
+
+    If an identical payload has been received within the last 5 minutes, this endpoint
+    returns the existing payload ID with a 200 status and `duplicate: true` to enable
+    idempotent webhook delivery from upstream systems.
+    """
     webhook = await _require_board_webhook(
         session,
         board_id=board.id,
@@ -460,6 +518,33 @@ async def ingest_board_webhook(
         await request.body(),
         content_type=content_type,
     )
+
+    # Compute fingerprint and check for duplicates
+    fingerprint = compute_payload_fingerprint(payload_value)
+    existing_payload = await _find_duplicate_payload(
+        session,
+        board_id=board.id,
+        webhook_id=webhook.id,
+        fingerprint_hash=fingerprint,
+    )
+
+    if existing_payload is not None:
+        logger.info(
+            "webhook.ingest.duplicate_detected",
+            extra={
+                "board_id": str(board.id),
+                "webhook_id": str(webhook.id),
+                "existing_payload_id": str(existing_payload.id),
+                "fingerprint_hash": fingerprint[:16],
+            },
+        )
+        return BoardWebhookIngestResponse(
+            board_id=board.id,
+            webhook_id=webhook.id,
+            payload_id=existing_payload.id,
+            duplicate=True,
+        )
+
     payload = BoardWebhookPayload(
         board_id=board.id,
         webhook_id=webhook.id,
@@ -467,6 +552,7 @@ async def ingest_board_webhook(
         headers=headers,
         source_ip=request.client.host if request.client else None,
         content_type=content_type,
+        fingerprint_hash=fingerprint,
     )
     session.add(payload)
     memory = BoardMemory(
@@ -489,6 +575,7 @@ async def ingest_board_webhook(
             "board_id": str(board.id),
             "webhook_id": str(webhook.id),
             "memory_id": str(memory.id),
+            "fingerprint_hash": fingerprint[:16],
         },
     )
 
@@ -522,4 +609,5 @@ async def ingest_board_webhook(
         board_id=board.id,
         webhook_id=webhook.id,
         payload_id=payload.id,
+        duplicate=False,
     )

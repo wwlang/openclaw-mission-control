@@ -267,8 +267,9 @@ async def test_notify_target_agent_prefers_mapped_agent(monkeypatch: pytest.Monk
             agent_name: str,
             message: str,
             deliver: bool = False,
+            idempotency_key: str | None = None,
         ) -> None:
-            del config, message, deliver
+            del config, message, deliver, idempotency_key
             sent.append({"session_key": session_key, "agent_name": agent_name})
 
     monkeypatch.setattr(dispatch.Agent, "objects", _FakeAgentObjects())
@@ -324,8 +325,9 @@ async def test_notify_target_agent_falls_back_to_lead(monkeypatch: pytest.Monkey
             agent_name: str,
             message: str,
             deliver: bool = False,
+            idempotency_key: str | None = None,
         ) -> None:
-            del config, message, deliver
+            del config, message, deliver, idempotency_key
             sent.append({"session_key": session_key, "agent_name": agent_name})
 
     monkeypatch.setattr(dispatch.Agent, "objects", _FakeAgentObjects())

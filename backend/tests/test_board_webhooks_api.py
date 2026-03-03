@@ -148,8 +148,9 @@ async def test_ingest_board_webhook_stores_payload_and_enqueues_for_lead_dispatc
         agent_name: str,
         message: str,
         deliver: bool = False,
+        idempotency_key: str | None = None,
     ) -> None:
-        del self, config, deliver
+        del self, config, deliver, idempotency_key
         sent_messages.append(
             {
                 "session_id": session_key,
@@ -181,7 +182,7 @@ async def test_ingest_board_webhook_stores_payload_and_enqueues_for_lead_dispatc
                 headers={"X-Signature": "sha256=abc123"},
             )
 
-        assert response.status_code == 202
+        assert response.status_code == 200
         body = response.json()
         payload_id = UUID(body["payload_id"])
         assert body["board_id"] == str(board.id)
@@ -245,8 +246,9 @@ async def test_ingest_board_webhook_rejects_disabled_endpoint(
         agent_name: str,
         message: str,
         deliver: bool = False,
+        idempotency_key: str | None = None,
     ) -> None:
-        del self, session_key, config, agent_name, deliver
+        del self, session_key, config, agent_name, deliver, idempotency_key
         sent_messages.append(message)
         return None
 

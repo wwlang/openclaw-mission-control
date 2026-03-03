@@ -531,13 +531,24 @@ async def send_message(
     session_key: str,
     config: GatewayConfig,
     deliver: bool = False,
+    idempotency_key: str | None = None,
 ) -> object:
-    """Send a chat message to a session."""
+    """Send a chat message to a session.
+
+    Args:
+        message: The message content to send.
+        session_key: The session identifier.
+        config: Gateway connection configuration.
+        deliver: Whether to deliver the message immediately.
+        idempotency_key: Optional idempotency key for deduplication. If not provided,
+            a new UUID will be generated. Callers should pass a persistent key when
+            retrying failed requests to enable server-side deduplication.
+    """
     params: dict[str, Any] = {
         "sessionKey": session_key,
         "message": message,
         "deliver": deliver,
-        "idempotencyKey": str(uuid4()),
+        "idempotencyKey": idempotency_key if idempotency_key else str(uuid4()),
     }
     return await openclaw_call("chat.send", params, config=config)
 

@@ -30,3 +30,6 @@ class BoardWebhookPayload(QueryModel, table=True):
     source_ip: str | None = None
     content_type: str | None = None
     received_at: datetime = Field(default_factory=utcnow, index=True)
+    # Fingerprint hash for deduplication. Allows detecting duplicate payloads
+    # within a time window to prevent processing the same webhook twice.
+    fingerprint_hash: str | None = Field(default=None, index=True)
